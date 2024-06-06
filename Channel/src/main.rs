@@ -5,6 +5,7 @@ use std::mem::MaybeUninit; // unsafe Option of rust
 use std::sync::atomic::Ordering::{Acquire,Release};
 use std::marker::PhantomData;
 use std::thread;
+
 pub struct Channel<T> {
     message: UnsafeCell<MaybeUninit<T>>,
     ready: AtomicBool,
@@ -25,7 +26,7 @@ impl<T> Sender<'_, T> {
     pub fn send(self, message: T) {
         unsafe { (*self.channel.message.get()).write(message) };
         self.channel.ready.store(true, Release);
-        self.receiving_thread.unpark(); // 
+        self.receiving_thread.unpark(); // so that user doesnot need ti handle it 
     }
 }
 
@@ -46,10 +47,12 @@ impl<T> Channel<T> {
         }
     }
 
+// for getting the sender and receiver separately from the one-shot channel
+
     pub fn split<'a>(&'a mut self) -> (Sender<'a, T>, Receiver<'a, T>) {
         *self = Self::new();
         (
-            Sender {
+            Sender {    
                 channel: self,
                 receiving_thread: thread::current(), // 
             },
@@ -60,6 +63,7 @@ impl<T> Channel<T> {
         )
     }
 }
+// so that the borrowed value will be dropped after lock is released
 impl<T> Drop for Channel<T> {
     fn drop(&mut self) {
         if *self.ready.get_mut() {
