@@ -150,11 +150,6 @@ impl<T> Clone for Arc<T> {
     }
 }
 
-fn main() {
-    println!("Hello, world!");
-}
-
-
 
 #[test]
 fn test() {
