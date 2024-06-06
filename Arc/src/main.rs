@@ -168,30 +168,28 @@ fn test() {
         }
     }
 
-    // Create two Arcs sharing an object containing a string
-    // and a DetectDrop, to detect when it's dropped.
+    // Create an Arc with two weak pointers.
     let x = Arc::new(("hello", DetectDrop));
-    let y = x.clone();
+    let y = Arc::downgrade(&x);
+    let z = Arc::downgrade(&x);
 
-    // Send x to another thread, and use it there.
     let t = std::thread::spawn(move || {
-        assert_eq!(x.0, "hello");
+        // Weak pointer should be upgradable at this point.
+        let y = y.upgrade().unwrap();
+        assert_eq!(y.0, "hello");
     });
-
-    // In parallel, y should still be usable here.
-    assert_eq!(y.0, "hello");
-
-    // Wait for the thread to finish.
+    assert_eq!(x.0, "hello");
     t.join().unwrap();
 
-    // One Arc, x, should be dropped by now.
-    // We still have y, so the object shouldn't have been dropped yet.
+    // The data shouldn't be dropped yet,
+    // and the weak pointer should be upgradable.
     assert_eq!(NUM_DROPS.load(Relaxed), 0);
+    assert!(z.upgrade().is_some());
 
-    // Drop the remaining `Arc`.
-    drop(y);
+    drop(x);
 
-    // Now that `y` is dropped too,
-    // the object should've been dropped.
+    // Now, the data should be dropped, and the
+    // weak pointer should no longer be upgradable.
     assert_eq!(NUM_DROPS.load(Relaxed), 1);
+    assert!(z.upgrade().is_none());
 }
