@@ -2,14 +2,26 @@ use std::{ptr::NonNull, sync::atomic::AtomicUsize};
 use std::sync::atomic::Ordering::{Release,Acquire,Relaxed};
 use std::ops::Deref;
 use std::sync::atomic::fence;
+use std::cell::UnsafeCell;
 struct ArcData<T>{
-    ref_count:AtomicUsize,
-    data:T,
+    /// Number of `Arc`s.
+    data_ref_count: AtomicUsize,
+    /// Number of `Arc`s and `Weak`s combined.
+    alloc_ref_count: AtomicUsize,
+    /// The data. `None` if there's only weak pointers left.
+    data: UnsafeCell<Option<T>>,
 }
-// we did not use dorectly Box allocation because we need shared ownershp and not exclusive one
-struct Arc<T>{
-    ptr:NonNull<ArcData<T>>,
+// we did not use directly Box allocation because we need shared ownershp and not exclusive one
+pub struct Arc<T> {
+    weak: Weak<T>,
 }
+
+pub struct Weak<T> {
+    ptr: NonNull<ArcData<T>>,
+}
+
+unsafe impl<T: Sync + Send> Send for Weak<T> {}
+unsafe impl<T: Sync + Send> Sync for Weak<T> {}
 
 unsafe impl<T: Send + Sync> Send for Arc<T> {}
 unsafe impl<T: Send + Sync> Sync for Arc<T> {}
@@ -20,15 +32,24 @@ Box::leak to give up our exclusive ownership of this allocation,
 NonNull::from to turn it into a pointer*/ 
 impl <T> Arc<T>{
     pub fn new(data:T)->Arc<T>{
-        Arc{
-            ptr:NonNull::from(Box::leak(Box::new(ArcData{
-                ref_count:AtomicUsize::new(1),
-                data:data,
+        Arc {
+            weak: Weak {
+                ptr: NonNull::from(Box::leak(Box::new(ArcData {
+                    alloc_ref_count: AtomicUsize::new(1),
+                    data_ref_count: AtomicUsize::new(1),
+                    data: UnsafeCell::new(Some(data)),
                 }))),
+            },
         }
     }
     fn data(&self)->&ArcData<T> {
         unsafe{self.ptr.as_ref()}
+    }
+}
+
+impl<T> Weak<T> {
+    fn data(&self) -> &ArcData<T> {
+        unsafe { self.ptr.as_ref() }
     }
 }
 
@@ -37,15 +58,17 @@ impl<T> Deref for Arc<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        &self.data().data
+        let ptr = self.weak.data().data.get();
+        // Safety: Since there's an Arc to the data,
+        // the data exists and may be shared.
+        unsafe { (*ptr).as_ref().unwrap() }
     }
 }
 
 
-impl<T> Drop for Arc<T> {
+impl<T> Drop for Weak<T> {
     fn drop(&mut self) {
-        // we need to make sure that before dropping no one is accessing that data so we reduce the ref_count
-        if self.data().ref_count.fetch_sub(1,Release) == 1 {
+        if self.data().alloc_ref_count.fetch_sub(1, Release) == 1 {
             fence(Acquire);
             unsafe {
                 drop(Box::from_raw(self.ptr.as_ptr()));
@@ -53,17 +76,38 @@ impl<T> Drop for Arc<T> {
         }
     }
 }
-impl<T> Clone for Arc<T> {
+
+
+impl<T> Drop for Arc<T> {
+    fn drop(&mut self) {
+        if self.weak.data().data_ref_count.fetch_sub(1, Release) == 1 {
+            fence(Acquire);
+            let ptr = self.weak.data().data.get();
+            // Safety: The data reference counter is zero,
+            // so nothing will access it.
+            unsafe {
+                (*ptr) = None;
+            }
+        }
+    }
+}
+
+
+impl<T> Clone for Weak<T> {
     fn clone(&self) -> Self {
-        
-        // handles overflows
-        if self.data().ref_count.fetch_add(1, Relaxed) > usize::MAX / 2 {
+        if self.data().alloc_ref_count.fetch_add(1, Relaxed) > usize::MAX / 2 {
             std::process::abort();
         }
-        self.data().ref_count.fetch_add(1, Relaxed);
-        Arc {
-            ptr: self.ptr,
+        Weak { ptr: self.ptr }
+    }
+}
+impl<T> Clone for Arc<T> {
+    fn clone(&self) -> Self {
+        let weak = self.weak.clone();
+        if weak.data().data_ref_count.fetch_add(1, Relaxed) > usize::MAX / 2 {
+            std::process::abort();
         }
+        Arc { weak }
     }
 }
 
