@@ -42,14 +42,53 @@ impl <T> Arc<T>{
             },
         }
     }
-    fn data(&self)->&ArcData<T> {
-        unsafe{self.ptr.as_ref()}
+
+    // for getting a mutable refernce when total count is 1 only , it can be mutable
+    pub fn get_mut(arc: &mut Self) -> Option<&mut T> {
+        if arc.weak.data().alloc_ref_count.load(Relaxed) == 1 {
+            fence(Acquire);
+            // Safety: Nothing else can access the data, since
+            // there's only one Arc, to which we have exclusive access,
+            // and no Weak pointers.
+            let arcdata = unsafe { arc.weak.ptr.as_mut() };
+            let option = arcdata.data.get_mut();
+            // We know the data is still available since we
+            // have an Arc to it,  this won't panic.
+            let data = option.as_mut().unwrap();
+            Some(data)
+        } else {
+            None
+        }
+    }
+    //get a Weak from Arc , opposite to the upgrade function
+    pub fn downgrade(arc: &Self) -> Weak<T> {
+        arc.weak.clone()
     }
 }
 
 impl<T> Weak<T> {
     fn data(&self) -> &ArcData<T> {
         unsafe { self.ptr.as_ref() }
+    }
+
+    // used to get the data from a Weak<T> , it might be dropped by allocation if only weak ones are left , so it return value is an Option enum
+    pub fn upgrade(&self) -> Option<Arc<T>> {
+        let mut cnt = self.data().data_ref_count.load(Relaxed);
+        loop {
+            if cnt == 0 {
+                return None;
+            }
+            assert!(cnt <= usize::MAX / 2);
+            if let Err(e) =
+                self.data()
+                    .data_ref_count
+                    .compare_exchange_weak(cnt, cnt + 1, Relaxed, Relaxed)
+            {
+                cnt = e;
+                continue;
+            }
+            return Some(Arc { weak: self.clone() });
+        }
     }
 }
 
